@@ -55,6 +55,21 @@ GDELT_COLUMNS = [
     "DATEADDED", "SOURCEURL",
 ]
 
+
+def sorted_clean_csv_files(input_pattern, output_file):
+    """Return cleaned source CSVs in stable filename order.
+
+    The dashboard-ready output can match the same glob as the source extracts,
+    so this helper keeps the filtering and sorting of cleaned CSV files with the
+    GDELT cleaning utilities instead of the Streamlit app.
+    """
+    return sorted(
+        path
+        for path in Path(".").glob(input_pattern)
+        if path.name != output_file
+    )
+
+
 def clean_raw_gdelt_export(input_file=RAW_GDELT_FILE, output_file=CLEAN_OUTPUT_FILE):
     """Read a raw GDELT event file and write a headered CSV.
 

@@ -6,9 +6,10 @@ and writes the final dataset consumed by ``app.py``.
 """
 
 import math
-from pathlib import Path
 
 import pandas as pd
+
+from gdelt_cleaning import sorted_clean_csv_files
 
 
 # Input files are the cleaned CSVs produced by ``gdelt_cleaning.py`` or provided
@@ -160,11 +161,7 @@ def prepare_data():
 
     # Collect every cleaned course-project CSV but avoid feeding the derived
     # travel-risk output back into itself.
-    input_files = sorted(
-        path
-        for path in Path(".").glob(INPUT_PATTERN)
-        if path.name != OUTPUT_FILE
-    )
+    input_files = sorted_clean_csv_files(INPUT_PATTERN, OUTPUT_FILE)
     if not input_files:
         raise FileNotFoundError(f"No input files matched {INPUT_PATTERN}")
 

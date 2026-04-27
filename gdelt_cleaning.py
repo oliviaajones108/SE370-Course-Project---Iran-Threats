@@ -2,8 +2,13 @@
 
 Run this script only when you have a raw tab-separated GDELT file, such as
 ``20260415_export.CSV``, that does not already include column headers. The rest
-of the project expects cleaned CSV files whose names start with
-``course.project.data.clean``.
+of the project expects the combined cleaned CSV to be named
+``course_project_data_clean_part1_combined.csv``.
+
+GDELT event downloads are often named ``.CSV`` but are actually tab-separated
+and do not include a header row. This file supplies the official GDELT column
+names, converts a few fields to useful types, and writes a normal CSV that the
+rest of the project can read consistently.
 """
 
 from pathlib import Path
@@ -14,10 +19,12 @@ import pandas as pd
 # Keep the input/output paths near the top so they are easy to change for a new
 # GDELT download date without hunting through the script.
 RAW_GDELT_FILE = Path("20260415_export.CSV")
-CLEAN_OUTPUT_FILE = Path("course.project.data.clean.csv")
+CLEAN_OUTPUT_FILE = Path("course_project_data_clean_part1_combined.csv")
 
 # GDELT 2.0 event exports contain 58 tab-separated fields and no header row.
 # This list supplies the official field names so pandas can label the dataset.
+# The comments group the columns by purpose, which helps when someone needs to
+# trace a dashboard field back to the original GDELT export.
 GDELT_COLUMNS = [
     # Identifiers + time
     "GLOBALEVENTID", "SQLDATE", "MonthYear", "Year", "FractionDate",
@@ -63,6 +70,9 @@ def sorted_clean_csv_files(input_pattern, output_file):
     so this helper keeps the filtering and sorting of cleaned CSV files with the
     GDELT cleaning utilities instead of the Streamlit app.
     """
+    # The prepared dashboard CSV starts with ``course.project`` too, so it can
+    # accidentally match broad glob patterns. Excluding ``output_file`` prevents
+    # the preprocessing step from reading its own derived output as input.
     return sorted(
         path
         for path in Path(".").glob(input_pattern)
@@ -78,6 +88,8 @@ def clean_raw_gdelt_export(input_file=RAW_GDELT_FILE, output_file=CLEAN_OUTPUT_F
     only the fields used numerically by the app are converted.
     """
 
+    # Fail early with a clear message instead of letting pandas raise a longer
+    # file-read error.
     if not input_file.exists():
         raise FileNotFoundError(f"Could not find raw GDELT file: {input_file}")
 
@@ -94,6 +106,8 @@ def clean_raw_gdelt_export(input_file=RAW_GDELT_FILE, output_file=CLEAN_OUTPUT_F
 
     # Convert date and scoring columns after import so calculations, filtering,
     # and plotting work correctly in the downstream preprocessing step.
+    # ``errors="coerce"`` turns invalid values into NaN/NaT rather than stopping
+    # the entire cleaning run because of one malformed field.
     df["GLOBALEVENTID"] = pd.to_numeric(df["GLOBALEVENTID"], errors="coerce")
     df["SQLDATE"] = pd.to_datetime(df["SQLDATE"], format="%Y%m%d", errors="coerce")
     df["GoldsteinScale"] = pd.to_numeric(df["GoldsteinScale"], errors="coerce")
@@ -110,6 +124,8 @@ def clean_raw_gdelt_export(input_file=RAW_GDELT_FILE, output_file=CLEAN_OUTPUT_F
 
 
 if __name__ == "__main__":
+    # When run as a script, clean the default raw export and print a small sample
+    # so the user can quickly check that columns and values look reasonable.
     cleaned = clean_raw_gdelt_export()
     print(f"Done: {len(cleaned)} rows, {len(cleaned.columns)} columns")
     print(f"Wrote {CLEAN_OUTPUT_FILE}")

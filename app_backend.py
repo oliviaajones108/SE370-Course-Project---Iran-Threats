@@ -1,4 +1,11 @@
-"""Backend helpers for the Middle East travel-risk Streamlit dashboard."""
+"""Backend helpers for the Middle East travel-risk Streamlit dashboard.
+
+The Streamlit page in ``app.py`` should read like a list of user actions. This
+module holds the supporting work behind those actions: loading data, applying
+filters, computing country scores, creating Folium maps, and building Altair
+charts. Keeping these helpers here makes the UI easier to understand and keeps
+the data logic testable outside the Streamlit page.
+"""
 
 import math
 from pathlib import Path
@@ -56,6 +63,10 @@ COUNTRY_GEOMETRY = {
 def load_data():
     """Load the dashboard dataset, rebuilding it when inputs changed."""
     output_path = Path(OUTPUT_FILE)
+
+    # The dashboard reads one prepared CSV, but that CSV is derived from one or
+    # more cleaned GDELT extracts. If any source extract is newer than the
+    # prepared output, the prepared output is stale and needs to be regenerated.
     input_paths = sorted_clean_csv_files(INPUT_PATTERN, OUTPUT_FILE)
     output_is_stale = (
         not output_path.exists()
@@ -63,11 +74,16 @@ def load_data():
     )
     if output_is_stale:
         prepare_data()
+
+    # Parse ``date`` immediately so downstream filters, charts, and popup labels
+    # can use datetime operations without repeating conversion code.
     return pd.read_csv(OUTPUT_FILE, parse_dates=["date"])
 
 
 def filter_options(data):
     """Return stable option lists for user-facing dashboard controls."""
+    # Drop missing values so Streamlit does not show blank filter choices, then
+    # sort for a predictable user experience every time the app refreshes.
     return {
         "countries": sorted(data["country"].dropna().unique()),
         "event_types": sorted(data["event_type"].dropna().unique()),
@@ -76,6 +92,9 @@ def filter_options(data):
 
 def normalize_date_range(date_range):
     """Convert Streamlit date input output into pandas timestamps."""
+    # Streamlit returns a tuple when a date range is selected, but can briefly
+    # return a one-item value while the user is editing. Treat a single date as a
+    # one-day range so the rest of the app always receives start/end timestamps.
     if len(date_range) == 2:
         return pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
     selected_date = pd.to_datetime(date_range[0])
@@ -84,11 +103,16 @@ def normalize_date_range(date_range):
 
 def filter_events(data, start_date, end_date, countries, event_types, only_conflict, only_airspace):
     """Apply the user's selected scenario filters to the event dataset."""
+    # Start with the filters that are always active: date range, selected
+    # countries, and selected event types.
     filtered = data[
         data["date"].between(start_date, end_date)
         & data["country"].isin(countries)
         & data["event_type"].isin(event_types)
     ].copy()
+
+    # These checkboxes are optional narrower views. They are applied after the
+    # main selection so they act like "show only this subset" toggles.
     if only_conflict:
         filtered = filtered[filtered["conflict_related"]]
     if only_airspace:
@@ -98,6 +122,8 @@ def filter_events(data, start_date, end_date, countries, event_types, only_confl
 
 def summarize_country_risk(df):
     """Aggregate event-level rows into one risk score per country."""
+    # Returning an empty dataframe with the expected columns keeps callers from
+    # failing if a filter combination has no matching events.
     if df.empty:
         return pd.DataFrame(
             columns=[
@@ -113,6 +139,9 @@ def summarize_country_risk(df):
             ]
         )
 
+    # Convert event-level records into one row per country. Counts capture event
+    # volume, while the average risk captures the typical severity of those
+    # events.
     grouped = (
         df.groupby(["country", "country_code"], as_index=False)
         .agg(
@@ -123,12 +152,23 @@ def summarize_country_risk(df):
             avg_event_risk=("event_risk", "mean"),
         )
     )
+
+    # Shares prevent large countries from looking risky only because they have
+    # more reports. A country with many events but few severe/conflict events
+    # should not automatically outrank a smaller country with concentrated risk.
     grouped["conflict_share"] = grouped["conflict_events"] / grouped["event_count"]
     grouped["severe_share"] = grouped["severe_events"] / grouped["event_count"]
+
+    # Log scaling keeps volume useful without letting very large event counts
+    # dominate the score. The denominator normalizes each signal to roughly 0-1.
     max_events = max(grouped["event_count"].max(), 1)
     max_airspace = max(grouped["airspace_events"].max(), 1)
     volume_signal = grouped["event_count"].apply(lambda value: math.log1p(value) / math.log1p(max_events))
     airspace_signal = grouped["airspace_events"].apply(lambda value: math.log1p(value) / math.log1p(max_airspace))
+
+    # The final score is intentionally simple and explainable for a class
+    # dashboard. It blends event severity, conflict concentration, severe-event
+    # concentration, total reporting volume, and airspace-related volume.
     grouped["risk_score"] = (
         grouped["avg_event_risk"] * 3
         + grouped["conflict_share"] * 20
@@ -143,6 +183,10 @@ def summarize_country_risk(df):
 def make_country_geojson(country_scores):
     """Convert country risk scores into GeoJSON features for Folium."""
     features = []
+
+    # Folium's GeoJson layer expects each country to be represented as a feature
+    # with geometry and properties. This lookup lets us attach computed scores to
+    # the simple country polygons defined above.
     score_lookup = country_scores.set_index("country_code").to_dict("index")
 
     for code, name in MIDDLE_EAST_COUNTRIES.items():
@@ -150,6 +194,8 @@ def make_country_geojson(country_scores):
         if geometry is None:
             continue
 
+        # Countries with no selected events still get a feature so the map keeps
+        # a consistent regional outline; their risk values display as zero.
         row = score_lookup.get(code, {})
         features.append(
             {
@@ -165,6 +211,9 @@ def make_country_geojson(country_scores):
                 },
                 "geometry": {
                     "type": "Polygon",
+                    # GeoJSON stores coordinates as [longitude, latitude], while
+                    # the project geometry is easier to read as [latitude,
+                    # longitude]. Reverse each point when creating the feature.
                     "coordinates": [[list(reversed(point)) for point in geometry["polygon"]]],
                 },
             }
@@ -174,8 +223,13 @@ def make_country_geojson(country_scores):
 
 def make_choropleth(country_scores):
     """Build the country-level shaded risk map."""
+    # CartoDB Positron gives a low-distraction basemap so the risk shading and
+    # country tooltips remain the visual focus.
     risk_map = folium.Map(location=REGION_CENTER, zoom_start=4, tiles="CartoDB Positron")
     geojson = make_country_geojson(country_scores)
+
+    # Use at least 10 as the color-scale maximum so very low-risk selections
+    # still produce visible differences between countries.
     max_score = max(float(country_scores["risk_score"].max()) if not country_scores.empty else 0, 10)
     color_scale = cm.LinearColormap(
         MONOCHROME_SCALE,
@@ -185,6 +239,7 @@ def make_choropleth(country_scores):
     )
 
     def style(feature):
+        """Return Folium polygon styling for one country feature."""
         score = feature["properties"]["risk_score"]
         return {
             "fillColor": color_scale(score),
@@ -193,6 +248,8 @@ def make_choropleth(country_scores):
             "fillOpacity": 0.78 if score else 0.2,
         }
 
+    # Tooltips expose the exact values behind the shade color when the user
+    # hovers over a country.
     tooltip = folium.GeoJsonTooltip(
         fields=["name", "risk_score", "recommendation", "event_count", "severe_events", "airspace_events"],
         aliases=["Country", "Risk score", "Recommendation", "Events", "High/severe events", "Airspace-related"],
@@ -209,12 +266,20 @@ def make_event_map(df):
     if df.empty:
         return event_map
 
+    # Match the point-map colors to the same blue palette used elsewhere.
     max_risk = max(df["event_risk"].max(), 10)
     color_scale = cm.LinearColormap(MONOCHROME_SCALE, vmin=0, vmax=max_risk, caption="Event risk")
+
+    # Rendering every event can slow the browser when the extracts are large.
+    # Showing the highest-risk 1,500 events keeps the map responsive while still
+    # emphasizing the records most relevant to travel risk.
     plot_df = df.sort_values("event_risk", ascending=False).head(1500)
 
     for _, row in plot_df.iterrows():
         color = color_scale(row["event_risk"])
+
+        # Popup text gives context for a clicked marker. HTML is used because
+        # Folium popups render inside the browser map.
         popup = (
             f"<b>{row['country']}</b><br>"
             f"<b>Event type:</b> {row['event_type']}<br>"
@@ -224,6 +289,9 @@ def make_event_map(df):
             f"<b>Location:</b> {row['location']}<br>"
             f"<b>Date:</b> {row['date'].date()}"
         )
+
+        # Circle size and shade both increase with event risk so the map can be
+        # scanned quickly even before a user clicks any marker.
         folium.CircleMarker(
             location=[row["lat"], row["lon"]],
             radius=max(3, min(10, 2 + row["event_risk"] / 4)),
@@ -242,11 +310,14 @@ def make_event_map(df):
 
 def blue_chart(chart):
     """Apply the shared blue styling to Altair charts."""
+    # Centralizing the chart styling keeps all Altair visuals consistent.
     return chart.configure_range(category=MONOCHROME_SCALE[1:]).configure_axis(labelLimit=180)
 
 
 def make_ranking_chart(country_scores):
     """Build the country risk ranking chart."""
+    # The ranking chart intentionally shows only the top countries so labels
+    # remain readable and the chart answers "where should I look first?"
     ranking = country_scores.head(12)
     chart = (
         alt.Chart(ranking)
@@ -263,6 +334,8 @@ def make_ranking_chart(country_scores):
 
 def make_event_type_heatmap(filtered):
     """Build a heatmap of the most common country-event type pairings."""
+    # Group by country and event type to show which kinds of events are driving
+    # the selected scenario. Limit to 25 combinations so the heatmap stays tidy.
     type_counts = (
         filtered.groupby(["country", "event_type"], as_index=False)
         .size()
@@ -285,6 +358,8 @@ def make_event_type_heatmap(filtered):
 
 def make_daily_trend_chart(filtered):
     """Build the daily event-count trend chart."""
+    # Collapse event-level records into daily counts. The average risk is kept
+    # in the tooltip so the chart can show both volume and severity context.
     daily = (
         filtered.assign(day=filtered["date"].dt.date)
         .groupby("day", as_index=False)
@@ -305,6 +380,8 @@ def make_daily_trend_chart(filtered):
 
 def highest_risk_events(filtered, limit=200):
     """Return the highest-risk event rows for the data table."""
+    # Keep the table focused on columns a user can interpret directly. Internal
+    # helper fields are omitted from this view.
     columns = [
         "date",
         "country",
